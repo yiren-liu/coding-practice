@@ -45,9 +45,7 @@ class LayerNorm(nn.Module):
         # gamma (scale) - initialized to ones
         # beta (shift) - initialized to zeros
         # Hint: Use nn.Parameter
-        self.gamma = nn.Parameter(torch.ones(d_model))
-        self.beta = nn.Parameter(torch.zeros(d_model))
-
+        pass
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -63,14 +61,8 @@ class LayerNorm(nn.Module):
         # 1. Compute mean and variance along last dimension
         # 2. Normalize: (x - mean) / sqrt(var + eps)
         # 3. Apply affine transformation: result * gamma + beta
+        pass
 
-        # TODO: which dim(s) are we doing the norm for?
-        mean = x.mean(dim=-1, keepdim=True)
-        var = x.var(dim=-1, keepdim=True, unbiased=False)
-
-        x_normed = ((x - mean) / torch.sqrt(var - self.eps)) * self.gamma + self.beta
-    
-        return x_normed
 
 class RMSNorm(nn.Module):
     """
@@ -92,9 +84,8 @@ class RMSNorm(nn.Module):
         self.eps = eps
         # TODO: Initialize learnable scale parameter (gamma)
         # Hint: Use nn.Parameter with torch.ones
-        self.gamma = nn.Parameter(torch.ones(d_model))
-
-
+        pass
+    
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Apply RMSNorm.
@@ -109,11 +100,7 @@ class RMSNorm(nn.Module):
         # 1. Compute RMS: sqrt(mean(x^2) + eps)
         # 2. Normalize: x / RMS
         # 3. Scale by learnable parameter
-
-        rms = torch.sqrt((x.square()).mean(dim=-1, keepdim=True) + self.eps)
-        y = x / rms * self.gamma
-
-        return y
+        pass
 
 
 class RotaryPositionEmbedding(nn.Module):
@@ -145,10 +132,6 @@ class RotaryPositionEmbedding(nn.Module):
         
         # Hint: Final shapes should be [1, max_seq_len, 1, d_model]
         # for easy broadcasting with [batch, seq_len, num_heads, d_k]
-
-        self.theta = self.base
-        
-
         pass
     
     def forward(self, x: torch.Tensor, seq_len: int) -> torch.Tensor:
