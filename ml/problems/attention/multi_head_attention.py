@@ -63,9 +63,15 @@ class MultiHeadAttention(nn.Module):
         # - Three separate Linear layers for Q, K, V
         # - One combined Linear layer that projects to 3 * d_model
         # Both approaches are valid!
-        
-        pass
-    
+
+        self.W_q = nn.Linear(d_model, d_model, bias=bias)
+        self.W_k = nn.Linear(d_model, d_model, bias=bias)
+        self.W_v = nn.Linear(d_model, d_model, bias=bias)
+
+        self.W_o = nn.Linear(d_model, d_model, bias=bias)
+
+        self.dropout = nn.Dropout(dropout)
+
     def forward(
         self,
         x: torch.Tensor,
@@ -96,8 +102,41 @@ class MultiHeadAttention(nn.Module):
         # Hint for reshaping:
         # - From [batch, seq_len, d_model] to [batch, seq_len, num_heads, d_k]
         # - Then transpose to [batch, num_heads, seq_len, d_k]
+
+        batch_size, seq_len, _ = x.shape
+
+        Q = self.W_q(x)
+        K = self.W_k(x)
+        V = self.W_v(x)
+
+        # reshape to MH 
+        # MISTAKE: you are not supposed to repeat, but view and reshape, since you want to split the dims
+        # MISTAKE: you need to reshape to (batch_size, seq_len, self.num_heads, self.d_k) first, and then transpose
+        Q = Q.view(batch_size, seq_len, self.num_heads, self.d_k).transpose(1,2)
+        K = K.view(batch_size, seq_len, self.num_heads, self.d_k).transpose(1,2)
+        V = V.view(batch_size, seq_len, self.num_heads, self.d_k).transpose(1,2)
+
+        # scaled dot-product attn
+        scores = Q @ K.transpose(2,3)/np.sqrt(self.d_k) # (b, h, s, s)
+
+        # TODO: apply casual masking
+        if mask is not None:
+            scores = torch.masked_fill(scores, mask==0, -torch.inf)
+        scores = F.softmax(scores, dim=-1)
+
+        scores = self.dropout(scores)
+
+        attn = scores @ V # (b, h, s, d_k)
+
+        # concat the MH
+        # MISTAKE: DO NOT reshape the scores, should just return as is
+        attn = attn.transpose(1,2).contiguous().view(batch_size, seq_len, self.d_model) # (b, s, d)
+        attn = self.W_o(attn)
         
-        pass
+        if return_attention:
+            return attn, scores
+        else:
+            return attn
     
     @staticmethod
     def create_causal_mask(seq_len: int, device: torch.device) -> torch.Tensor:
@@ -114,7 +153,14 @@ class MultiHeadAttention(nn.Module):
         """
         # TODO: Create a lower triangular mask
         # Hint: Use torch.tril()
-        pass
+
+        mask = torch.ones(seq_len,seq_len).to(device)
+
+        # TODO: come back later --- why is it lower triangular matrix?
+        # MISTAKE: need to unsqueeze twice
+        mask = torch.tril(mask).unsqueeze(0).unsqueeze(0)
+
+        return mask
 
 
 # ============= Test Cases =============
