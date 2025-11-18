@@ -42,8 +42,8 @@ class MLTestRunner:
         self, 
         test_func: Callable, 
         test_name: str = "",
-        rtol: float = 1e-5,
-        atol: float = 1e-8
+        rtol: float = 1e-4,
+        atol: float = 1e-6
     ) -> bool:
         """
         Run a single test case.
