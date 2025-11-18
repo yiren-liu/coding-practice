@@ -1,15 +1,17 @@
 """
-ML Implementation: Transformer Components (RMSNorm, RoPE, Transformer Block)
+ML Implementation: Transformer Components (LayerNorm, RMSNorm, RoPE, Transformer Block)
 
 Description:
-Implement three key transformer components:
-1. RMSNorm (Root Mean Square Layer Normalization) - simpler alternative to LayerNorm
-2. Rotary Position Embeddings (RoPE) - position encoding in rotation space
-3. Complete Transformer Block with pre-norm architecture
+Implement four key transformer components:
+1. LayerNorm (Layer Normalization) - standard normalization technique
+2. RMSNorm (Root Mean Square Layer Normalization) - simpler alternative to LayerNorm
+3. Rotary Position Embeddings (RoPE) - position encoding in rotation space
+4. Complete Transformer Block with pre-norm architecture
 
 These are modern alternatives used in models like LLaMA, GPT-NeoX, and PaLM.
 
 References:
+- LayerNorm: https://arxiv.org/abs/1607.06450
 - RMSNorm: https://arxiv.org/abs/1910.07467
 - RoPE: https://arxiv.org/abs/2104.09864
 - Pre-norm Transformers: https://arxiv.org/abs/2002.04745
@@ -20,6 +22,46 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math
 from typing import Optional, Tuple
+
+
+class LayerNorm(nn.Module):
+    """
+    Layer Normalization (standard version).
+    
+    Normalizes inputs to have zero mean and unit variance, then applies
+    learnable affine transformation. Used in the original Transformer paper.
+    
+    Formula: y = (x - mean(x)) / sqrt(var(x) + eps) * gamma + beta
+    
+    Args:
+        d_model: Dimension of the model
+        eps: Small constant for numerical stability (default: 1e-6)
+    """
+    
+    def __init__(self, d_model: int, eps: float = 1e-6):
+        super().__init__()
+        self.eps = eps
+        # TODO: Initialize learnable parameters
+        # gamma (scale) - initialized to ones
+        # beta (shift) - initialized to zeros
+        # Hint: Use nn.Parameter
+        pass
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Apply LayerNorm.
+        
+        Args:
+            x: Input tensor of shape [batch_size, seq_len, d_model]
+            
+        Returns:
+            Normalized tensor of same shape
+        """
+        # TODO: Implement LayerNorm
+        # 1. Compute mean and variance along last dimension
+        # 2. Normalize: (x - mean) / sqrt(var + eps)
+        # 3. Apply affine transformation: result * gamma + beta
+        pass
 
 
 class RMSNorm(nn.Module):
@@ -208,7 +250,59 @@ if __name__ == "__main__":
     from utils.test_runner import test_ml_implementation
     
     print("=" * 60)
-    print("Part 1: RMSNorm Tests")
+    print("Part 1: LayerNorm Tests")
+    print("=" * 60)
+    
+    # LayerNorm Tests
+    def test_layernorm_shape(norm):
+        batch_size, seq_len, d_model = 4, 16, 512
+        x = torch.randn(batch_size, seq_len, d_model)
+        output = norm(x)
+        return output.shape, x.shape
+    
+    def test_layernorm_zero_mean(norm):
+        # After normalization, mean should be close to 0
+        batch_size, seq_len, d_model = 2, 10, 512
+        x = torch.randn(batch_size, seq_len, d_model) * 10 + 5  # Non-zero mean
+        output = norm(x)
+        
+        result = output.mean(dim=-1, keepdim=True)
+        expected = torch.zeros(batch_size, seq_len, 1)
+        
+        return result, expected
+    
+    def test_layernorm_unit_variance(norm):
+        # After normalization, variance should be close to 1
+        batch_size, seq_len, d_model = 2, 10, 512
+        x = torch.randn(batch_size, seq_len, d_model) * 10
+        output = norm(x)
+        
+        result = output.var(dim=-1, keepdim=True, unbiased=False)
+        expected = torch.ones(batch_size, seq_len, 1)
+        
+        return result, expected
+    
+    def test_layernorm_learnable_params(norm):
+        # Should have learnable gamma and beta
+        has_weight = hasattr(norm, 'weight') or hasattr(norm, 'gamma')
+        has_bias = hasattr(norm, 'bias') or hasattr(norm, 'beta')
+        result = has_weight and has_bias
+        expected = True
+        return result, expected
+    
+    layernorm = LayerNorm(d_model=512)
+    
+    layernorm_tests = [
+        (test_layernorm_shape, "LayerNorm output shape"),
+        (test_layernorm_zero_mean, "LayerNorm mean ≈ 0"),
+        (test_layernorm_unit_variance, "LayerNorm variance ≈ 1"),
+        (test_layernorm_learnable_params, "LayerNorm has gamma and beta"),
+    ]
+    
+    test_ml_implementation(layernorm, layernorm_tests)
+    
+    print("\n" + "=" * 60)
+    print("Part 2: RMSNorm Tests")
     print("=" * 60)
     
     # RMSNorm Tests
@@ -246,7 +340,7 @@ if __name__ == "__main__":
     test_ml_implementation(rmsnorm, rmsnorm_tests)
     
     print("\n" + "=" * 60)
-    print("Part 2: Rotary Position Embeddings Tests")
+    print("Part 3: Rotary Position Embeddings Tests")
     print("=" * 60)
     
     # RoPE Tests
@@ -295,7 +389,7 @@ if __name__ == "__main__":
     test_ml_implementation(rope, rope_tests)
     
     print("\n" + "=" * 60)
-    print("Part 3: Transformer Block Tests")
+    print("Part 4: Transformer Block Tests")
     print("=" * 60)
     
     # Transformer Block Tests
@@ -378,6 +472,12 @@ if __name__ == "__main__":
     print("Implementation Tips:")
     print("=" * 60)
     print("""
+LayerNorm:
+- mean = mean(x, dim=-1, keepdim=True)
+- var = var(x, dim=-1, keepdim=True, unbiased=False)
+- output = (x - mean) / sqrt(var + eps) * gamma + beta
+- gamma and beta are learnable: nn.Parameter(torch.ones/zeros(d_model))
+
 RMSNorm:
 - RMS = sqrt(mean(x^2) + eps)
 - output = (x / RMS) * gamma
