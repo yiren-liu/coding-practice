@@ -17,6 +17,7 @@ References:
 - Pre-norm Transformers: https://arxiv.org/abs/2002.04745
 """
 
+from this import d
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -45,8 +46,8 @@ class LayerNorm(nn.Module):
         # gamma (scale) - initialized to ones
         # beta (shift) - initialized to zeros
         # Hint: Use nn.Parameter
-        pass
-    
+        self.weight = nn.Parameter(torch.ones(d_model))
+        self.bias = nn.Parameter(torch.zeros(d_model))
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Apply LayerNorm.
@@ -61,7 +62,15 @@ class LayerNorm(nn.Module):
         # 1. Compute mean and variance along last dimension
         # 2. Normalize: (x - mean) / sqrt(var + eps)
         # 3. Apply affine transformation: result * gamma + beta
-        pass
+        # Compute mean and variance along last dimension
+        mean = x.mean(dim=-1, keepdim=True)
+        var = x.var(dim=-1, keepdim=True, unbiased=False)
+        
+        # Normalize
+        x_norm = (x - mean) / torch.sqrt(var + self.eps)
+        
+        # Apply affine transformation
+        return self.weight * x_norm + self.bias
 
 
 class RMSNorm(nn.Module):
@@ -84,7 +93,7 @@ class RMSNorm(nn.Module):
         self.eps = eps
         # TODO: Initialize learnable scale parameter (gamma)
         # Hint: Use nn.Parameter with torch.ones
-        pass
+        self.weight = nn.Parameter(torch.ones(d_model))
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -100,8 +109,14 @@ class RMSNorm(nn.Module):
         # 1. Compute RMS: sqrt(mean(x^2) + eps)
         # 2. Normalize: x / RMS
         # 3. Scale by learnable parameter
-        pass
-
+        # Compute RMS: sqrt(mean(x^2) + eps)
+        rms = torch.sqrt(torch.mean(x ** 2, dim=-1, keepdim=True) + self.eps)
+        
+        # Normalize: x / RMS
+        x_norm = x / rms
+        
+        # Scale by learnable parameter
+        return self.weight * x_norm
 
 class RotaryPositionEmbedding(nn.Module):
     """
@@ -132,7 +147,20 @@ class RotaryPositionEmbedding(nn.Module):
         
         # Hint: Final shapes should be [1, max_seq_len, 1, d_model]
         # for easy broadcasting with [batch, seq_len, num_heads, d_k]
-        pass
+        self.theta = 1 / self.base ** (torch.arange(0, self.d_model, 2) / self.d_model)
+        self.pos = torch.arange(0, self.max_seq_len)
+        self.freq = torch.outer(self.pos, self.theta) # [seq_len, d/2]
+
+        sin = torch.sin(self.freq).unsqueeze(0).unsqueeze(2) # [1, seq_len, 1, d/2]
+        cos = torch.cos(self.freq).unsqueeze(0).unsqueeze(2) # [1, seq_len, 1, d/2]
+
+        # Repeat to match full dimension (each frequency applies to 2 dimensions)
+        cos = torch.cat([cos, cos], dim=-1)  # [1, max_seq_len, 1, d_model]
+        sin = torch.cat([sin, sin], dim=-1)  # [1, max_seq_len, 1, d_model]
+
+        # Register as buffers (not parameters, so they're not trained)
+        self.register_buffer('cos', cos)
+        self.register_buffer('sin', sin)
     
     def forward(self, x: torch.Tensor, seq_len: int) -> torch.Tensor:
         """
@@ -151,7 +179,14 @@ class RotaryPositionEmbedding(nn.Module):
         #    x1_rot = x1 * cos - x2 * sin
         #    x2_rot = x1 * sin + x2 * cos
         # 3. Concatenate back together
-        pass
+        _, seq_len, _, _ = x.shape
+
+        cos = self.cos[:, :seq_len, :, :]  # [1, seq_len, 1, d_model]
+        sin = self.sin[:, :seq_len, :, :]  # [1, seq_len, 1, d_model]
+
+        remb = x * cos + self.rotate_half(x) * sin
+
+        return remb
     
     @staticmethod
     def rotate_half(x: torch.Tensor) -> torch.Tensor:
@@ -161,7 +196,135 @@ class RotaryPositionEmbedding(nn.Module):
         """
         # TODO: Implement rotation helper
         # Split x in half, swap them, negate the first half
-        pass
+        d_model = x.shape[-1]
+        # MISTAKE: use ... instead of ::
+        x1 = x[..., :d_model//2]
+        x2 = x[..., d_model//2:]
+        xx = torch.concat([-x2, x1], dim=-1)
+        return xx
+
+class MultiHeadAttention(nn.Module):
+    """
+    Multi-Head Self-Attention mechanism.
+    
+    Args:
+        d_model: Dimension of the model (embedding dimension)
+        num_heads: Number of attention heads
+        dropout: Dropout probability (default: 0.1)
+        bias: Whether to use bias in linear projections (default: True)
+    """
+    
+    def __init__(
+        self, 
+        d_model: int, 
+        num_heads: int, 
+        dropout: float = 0.1,
+        bias: bool = True
+    ):
+        super().__init__()
+        assert d_model % num_heads == 0, "d_model must be divisible by num_heads"
+        
+        self.d_model = d_model
+        self.num_heads = num_heads
+        self.d_k = d_model // num_heads  # Dimension per head
+        
+        # Query, Key, Value projection layers
+        self.W_q = nn.Linear(d_model, d_model, bias=bias)
+        self.W_k = nn.Linear(d_model, d_model, bias=bias)
+        self.W_v = nn.Linear(d_model, d_model, bias=bias)
+        
+        # Output projection layer
+        self.W_o = nn.Linear(d_model, d_model, bias=bias)
+        
+        # Dropout layer
+        self.dropout = nn.Dropout(dropout)
+    
+    def forward(
+        self,
+        x: torch.Tensor,
+        mask: Optional[torch.Tensor] = None,
+        return_attention: bool = False
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        """
+        Forward pass of Multi-Head Attention.
+        
+        Args:
+            x: Input tensor of shape [batch_size, seq_len, d_model]
+            mask: Optional attention mask of shape [batch_size, 1, seq_len, seq_len]
+                  or [batch_size, 1, 1, seq_len] for causal masking.
+                  Use 0 for positions to mask, 1 for positions to attend to.
+            return_attention: If True, return attention weights along with output
+            
+        Returns:
+            output: Tensor of shape [batch_size, seq_len, d_model]
+            attention_weights (optional): Tensor of shape [batch_size, num_heads, seq_len, seq_len]
+        """
+        batch_size, seq_len, _ = x.shape
+        
+        # 1. Project input to Q, K, V
+        Q = self.W_q(x)  # [batch_size, seq_len, d_model]
+        K = self.W_k(x)  # [batch_size, seq_len, d_model]
+        V = self.W_v(x)  # [batch_size, seq_len, d_model]
+        
+        # 2. Reshape to [batch_size, num_heads, seq_len, d_k]
+        # First reshape to [batch_size, seq_len, num_heads, d_k]
+        # Then transpose to [batch_size, num_heads, seq_len, d_k]
+        Q = Q.view(batch_size, seq_len, self.num_heads, self.d_k).transpose(1, 2)
+        K = K.view(batch_size, seq_len, self.num_heads, self.d_k).transpose(1, 2)
+        V = V.view(batch_size, seq_len, self.num_heads, self.d_k).transpose(1, 2)
+        
+        # 3. Compute scaled dot-product attention
+        # Calculate attention scores: Q @ K^T / sqrt(d_k)
+        scores = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(self.d_k)
+        # scores shape: [batch_size, num_heads, seq_len, seq_len]
+        
+        # Apply mask if provided
+        if mask is not None:
+            scores = scores.masked_fill(mask == 0, -1e9)
+        
+        # Apply softmax to get attention weights
+        attn_weights = F.softmax(scores, dim=-1)  # [batch_size, num_heads, seq_len, seq_len]
+        
+        # Apply dropout
+        attn_weights = self.dropout(attn_weights)
+        
+        # Compute weighted sum of values
+        attn_output = torch.matmul(attn_weights, V)  # [batch_size, num_heads, seq_len, d_k]
+        
+        # 4. Reshape back to [batch_size, seq_len, d_model]
+        # First transpose to [batch_size, seq_len, num_heads, d_k]
+        # Then reshape/view to [batch_size, seq_len, d_model]
+        attn_output = attn_output.transpose(1, 2).contiguous()
+        attn_output = attn_output.view(batch_size, seq_len, self.d_model)
+        
+        # 5. Apply output projection
+        output = self.W_o(attn_output)  # [batch_size, seq_len, d_model]
+        
+        if return_attention:
+            return output, attn_weights
+        else:
+            return output
+    
+    @staticmethod
+    def create_causal_mask(seq_len: int, device: torch.device) -> torch.Tensor:
+        """
+        Create a causal mask for autoregressive attention.
+        
+        Args:
+            seq_len: Sequence length
+            device: Device to create the mask on
+            
+        Returns:
+            Causal mask of shape [1, 1, seq_len, seq_len]
+            Lower triangular matrix of 1s (can attend) and 0s (cannot attend)
+        """
+        # Create lower triangular mask
+        # This ensures that position i can only attend to positions <= i
+        mask = torch.tril(torch.ones(seq_len, seq_len, device=device))
+        # Add batch and head dimensions
+        mask = mask.unsqueeze(0).unsqueeze(0)  # [1, 1, seq_len, seq_len]
+        
+        return mask
 
 
 class TransformerBlock(nn.Module):
@@ -208,7 +371,22 @@ class TransformerBlock(nn.Module):
         # - First linear: d_model -> d_ff
         # - Activation: GELU (or SwiGLU for extra credit!)
         # - Second linear: d_ff -> d_model
-        pass
+        self.norm_attn = RMSNorm(self.d_model)
+        self.norm_ff = RMSNorm(self.d_model)
+        self.mha = MultiHeadAttention(d_model=self.d_model, num_heads=self.num_heads)
+        self.ff = nn.Sequential(
+            nn.Linear(self.d_model, self.d_model),
+            nn.ReLU(),
+            nn.Dropout(p=dropout),
+            nn.Linear(self.d_model, self.d_model),
+        )
+        self.dropout = nn.Dropout(dropout)
+        if use_rope:
+            self.rope = RotaryPositionEmbedding(self.d_model // num_heads, max_seq_len)
+        else:
+            # Regular position embeddings are added at the input layer
+            # (before transformer blocks), not inside the blocks
+            self.rope = None 
     
     def forward(
         self,
@@ -228,17 +406,29 @@ class TransformerBlock(nn.Module):
         # TODO: Implement pre-norm transformer block:
         # 1. Attention sub-layer: x = x + dropout(attention(norm(x)))
         # 2. Feed-forward sub-layer: x = x + dropout(feedforward(norm(x)))
-        pass
+        b, s, d = x.shape
+        x = self.norm_attn(x)
+
+        x = self._attention_block(x, mask)
+        x += self.dropout(x)
+    
+        x += self.dropout(self.ff(self.norm_attn(x)))
+        
+        return x
     
     def _attention_block(self, x: torch.Tensor, mask: Optional[torch.Tensor]) -> torch.Tensor:
         """Helper for attention sub-layer with optional RoPE."""
         # TODO: Implement attention with optional RoPE
-        pass
+        b, s, d = x.shape
+        if self.rope:
+            x = x.view(b, s, self.num_heads, d // self.num_heads)
+            x = self.rope(x, x.shape[-2]).view(b,s,d)
+        return self.mha(x, mask)
     
-    def _feedforward_block(self, x: torch.Tensor) -> torch.Tensor:
-        """Helper for feed-forward sub-layer."""
-        # TODO: Implement feed-forward network
-        pass
+    # def _feedforward_block(self, x: torch.Tensor) -> torch.Tensor:
+    #     """Helper for feed-forward sub-layer."""
+    #     # TODO: Implement feed-forward network
+    #     pass
 
 
 # ============= Test Cases =============
