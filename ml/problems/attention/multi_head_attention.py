@@ -42,125 +42,86 @@ class MultiHeadAttention(nn.Module):
     
     def __init__(
         self, 
-        d_model: int, 
-        num_heads: int, 
+        d_model: int,
+        num_heads: int,
         dropout: float = 0.1,
-        bias: bool = True
+        bias: bool = True,
     ):
         super().__init__()
-        assert d_model % num_heads == 0, "d_model must be divisible by num_heads"
-        
+        assert d_model % num_heads == 0
+
+        self.d_k = d_model // num_heads
         self.d_model = d_model
         self.num_heads = num_heads
-        self.d_k = d_model // num_heads  # Dimension per head
         
-        # TODO: Initialize the following components:
-        # 1. Query, Key, Value projection layers (can be combined or separate)
-        # 2. Output projection layer
-        # 3. Dropout layer
-        
-        # Hint: You can use either:
-        # - Three separate Linear layers for Q, K, V
-        # - One combined Linear layer that projects to 3 * d_model
-        # Both approaches are valid!
 
-        self.W_q = nn.Linear(d_model, d_model, bias=bias)
-        self.W_k = nn.Linear(d_model, d_model, bias=bias)
-        self.W_v = nn.Linear(d_model, d_model, bias=bias)
+        # params
+        self.Wq = nn.Linear(*[self.d_model]*2, bias=bias)
+        self.Wk = nn.Linear(*[self.d_model]*2, bias=bias)
+        self.Wv = nn.Linear(*[self.d_model]*2, bias=bias)
 
-        self.W_o = nn.Linear(d_model, d_model, bias=bias)
+        # MISTAKE!! don't forget this 
+        self.Wo = nn.Linear(d_model, d_model, bias=bias)
 
-        self.dropout = nn.Dropout(dropout)
+        self.dropout = nn.Dropout(p=dropout)
+
+
 
     def forward(
         self,
         x: torch.Tensor,
         mask: Optional[torch.Tensor] = None,
-        return_attention: bool = False
+        return_attention: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        """
-        Forward pass of Multi-Head Attention.
+        # x: [bs, s, d_model]
+        # mask: [1, 1, s, s]
+        bs, s, _ = x.shape
+        d_head = self.d_model//self.num_heads
+
+        # compute Q, K, V
+        Q, K, V = self.Wq(x), self.Wk(x), self.Wv(x) # [bs, s, d_model]
+
+        # split d_model into num_heads
+        Q = Q.view(bs, s, self.num_heads, d_head).transpose(1, 2) # [bs, num_heads, s, d_head]
+        K = K.view(bs, s, self.num_heads, d_head).transpose(1, 2) # [bs, num_heads, s, d_head]
+        V = V.view(bs, s, self.num_heads, d_head).transpose(1, 2) # [bs, num_heads, s, d_head]
+
+        # perform SDPMM for each head
+        ## SDP
+        scores: torch.Tensor = Q @ K.transpose(-2, -1)
+        scores = scores / torch.sqrt(torch.tensor(d_head))
         
-        Args:
-            x: Input tensor of shape [batch_size, seq_len, d_model]
-            mask: Optional attention mask of shape [batch_size, 1, seq_len, seq_len]
-                  or [batch_size, 1, 1, seq_len] for causal masking.
-                  Use 0 for positions to mask, 1 for positions to attend to.
-            return_attention: If True, return attention weights along with output
-            
-        Returns:
-            output: Tensor of shape [batch_size, seq_len, d_model]
-            attention_weights (optional): Tensor of shape [batch_size, num_heads, seq_len, seq_len]
-        """
-        # TODO: Implement the forward pass:
-        # 1. Project input to Q, K, V
-        # 2. Reshape to [batch_size, num_heads, seq_len, d_k]
-        # 3. Compute scaled dot-product attention
-        # 4. Reshape back to [batch_size, seq_len, d_model]
-        # 5. Apply output projection
-        
-        # Hint for reshaping:
-        # - From [batch, seq_len, d_model] to [batch, seq_len, num_heads, d_k]
-        # - Then transpose to [batch, num_heads, seq_len, d_k]
-
-        batch_size, seq_len, _ = x.shape
-
-        Q = self.W_q(x)
-        K = self.W_k(x)
-        V = self.W_v(x)
-
-        # reshape to MH 
-        # MISTAKE: you are not supposed to repeat, but view and reshape, since you want to split the dims
-        # MISTAKE: you need to reshape to (batch_size, seq_len, self.num_heads, self.d_k) first, and then transpose
-        Q = Q.view(batch_size, seq_len, self.num_heads, self.d_k).transpose(1,2)
-        K = K.view(batch_size, seq_len, self.num_heads, self.d_k).transpose(1,2)
-        V = V.view(batch_size, seq_len, self.num_heads, self.d_k).transpose(1,2)
-
-        # scaled dot-product attn
-        scores = Q @ K.transpose(2,3)/np.sqrt(self.d_k) # (b, h, s, s)
-
-        # TODO: apply casual masking
+        ## mask
         if mask is not None:
-            scores = torch.masked_fill(scores, mask==0, -torch.inf)
+            scores.masked_fill_(mask==0, -torch.inf)
+        
+        ## softmax
         scores = F.softmax(scores, dim=-1)
 
-        scores = self.dropout(scores)
+        ## dropout
+        scores = self.dropout(scores) # [bs, num_heads, s, s]
 
-        attn = scores @ V # (b, h, s, d_k)
+        ## calculate outputs
+        outs: torch.Tensor = scores @ V # [bs, num_heads, s, d_head]
 
-        # concat the MH
-        # MISTAKE: DO NOT reshape the scores, should just return as is
-        attn = attn.transpose(1,2).contiguous().view(batch_size, seq_len, self.d_model) # (b, s, d)
-        attn = self.W_o(attn)
-        
+        # concate heads back together (only the outputs, not attn scores)
+        outs = outs.transpose(1, 2).contiguous().view(bs, s, self.d_model) # [bs, s, d_model]
+
+        outs = self.Wo(outs)
+
         if return_attention:
-            return attn, scores
+            return outs, scores
         else:
-            return attn
-    
+            return outs
+        
+
+
     @staticmethod
     def create_causal_mask(seq_len: int, device: torch.device) -> torch.Tensor:
-        """
-        Create a causal mask for autoregressive attention.
-        
-        Args:
-            seq_len: Sequence length
-            device: Device to create the mask on
-            
-        Returns:
-            Causal mask of shape [1, 1, seq_len, seq_len]
-            Lower triangular matrix of 1s (can attend) and 0s (cannot attend)
-        """
-        # TODO: Create a lower triangular mask
-        # Hint: Use torch.tril()
-
-        mask = torch.ones(seq_len,seq_len).to(device)
-
-        # TODO: come back later --- why is it lower triangular matrix?
-        # MISTAKE: need to unsqueeze twice
-        mask = torch.tril(mask).unsqueeze(0).unsqueeze(0)
-
+        mask = torch.tril(torch.ones([seq_len, seq_len]))
+        mask = mask.unsqueeze(0).unsqueeze(0)
         return mask
+        
 
 
 # ============= Test Cases =============

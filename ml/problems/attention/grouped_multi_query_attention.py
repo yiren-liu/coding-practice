@@ -29,6 +29,7 @@ References:
 - Fast Transformer Decoding: https://arxiv.org/abs/2211.05102
 """
 
+from numpy import require
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -68,7 +69,10 @@ class MultiQueryAttention(nn.Module):
         # Value: d_model -> d_k (SINGLE head shared by all queries)
         # Output: d_model -> d_model
         # Hint: Use nn.Linear
-        pass
+        self.Wq = nn.Linear(self.d_model, self.d_model)
+        self.Wk = nn.Linear(self.d_model, self.d_k)
+        self.Wv = nn.Linear(self.d_model, self.d_k)
+        self.Wo = nn.Linear(self.d_model, self.d_model)
         
         self.dropout = nn.Dropout(dropout)
     
@@ -106,7 +110,32 @@ class MultiQueryAttention(nn.Module):
         # 4. Reshape and project output
         
         # Hint: Broadcasting will automatically handle the single KV head
-        pass
+
+        bs, s, _ = x.shape
+
+        Q = self.Wq(x).view(bs, s, self.num_heads, self.d_k).transpose(1, 2) # [bs, h, s, d_k]
+        K = self.Wk(x).unsqueeze(1) # [bs, 1, s, d_k]
+        V = self.Wk(x).unsqueeze(1) # [bs, 1, s, d_k]
+
+        scores: torch.Tensor = Q @ K.transpose(-2, -1) / torch.sqrt(torch.tensor(self.d_k))
+
+        if mask is not None:
+            scores.masked_fill(mask==0, -torch.inf)
+        
+        scores = F.softmax(scores, dim=-1)
+
+        scores = self.dropout(scores) # [bs, h, s, s]
+
+        outs: torch.Tensor = scores @ V # [bs, h, s, d_k]
+        outs = outs.transpose(1, 2).contiguous().view(bs, s, self.d_model)
+
+        outs = self.Wo(outs)
+
+        if return_attention:
+            return outs, scores
+        else: 
+            return outs
+
 
 
 class GroupedQueryAttention(nn.Module):
@@ -155,7 +184,10 @@ class GroupedQueryAttention(nn.Module):
         # Key: d_model -> num_kv_heads * d_k
         # Value: d_model -> num_kv_heads * d_k
         # Output: d_model -> d_model
-        pass
+        self.Wq = nn.Linear(self.d_model, self.d_model)
+        self.Wk = nn.Linear(self.d_model, self.num_kv_heads * self.d_k)
+        self.Wv = nn.Linear(self.d_model, self.num_kv_heads * self.d_k)
+        self.Wo = nn.Linear(self.d_model, self.d_model)
         
         self.dropout = nn.Dropout(dropout)
     
@@ -192,7 +224,33 @@ class GroupedQueryAttention(nn.Module):
         # 4. Reshape and project output
         
         # Hint: torch.repeat_interleave(K, repeats=self.num_queries_per_kv, dim=1)
-        pass
+        bs, s, _ = x.shape
+
+        Q: torch.Tensor = self.Wq(x).view(bs, s, self.num_heads, self.d_k).transpose(1, 2) # [bs, h, s, d_k]
+        K: torch.Tensor = self.Wk(x).view(bs, s, self.num_kv_heads, self.d_k).transpose(1, 2) # [bs, num_kv_heads, s, d_k]
+        V: torch.Tensor = self.Wk(x).view(bs, s, self.num_kv_heads, self.d_k).transpose(1, 2) # [bs, num_kv_heads, s, d_k]
+
+        K = K.repeat_interleave(self.num_queries_per_kv, dim=1) # [bs, h, s, d_k]
+        V = V.repeat_interleave(self.num_queries_per_kv, dim=1) # [bs, h, s, d_k]
+
+        scores: torch.Tensor = Q @ K.transpose(-2, -1) / torch.sqrt(torch.tensor(self.d_k))
+
+        if mask is not None:
+            scores.masked_fill(mask==0, -torch.inf)
+        
+        scores = F.softmax(scores, dim=-1)
+
+        scores = self.dropout(scores) # [bs, h, s, s]
+
+        outs: torch.Tensor = scores @ V # [bs, h, s, d_k]
+        outs = outs.transpose(1, 2).contiguous().view(bs, s, self.d_model)
+
+        outs = self.Wo(outs)
+
+        if return_attention:
+            return outs, scores
+        else: 
+            return outs
 
 
 class MultiHeadAttention(nn.Module):
@@ -217,9 +275,15 @@ class MultiHeadAttention(nn.Module):
         
         # TODO: Initialize projection layers
         # All projections are d_model -> d_model
-        pass
-        
-        self.dropout = nn.Dropout(dropout)
+        # params
+        self.Wq = nn.Linear(*[self.d_model]*2)
+        self.Wk = nn.Linear(*[self.d_model]*2)
+        self.Wv = nn.Linear(*[self.d_model]*2)
+
+        # MISTAKE!! don't forget this 
+        self.Wo = nn.Linear(d_model, d_model)
+
+        self.dropout = nn.Dropout(p=dropout)
     
     def forward(
         self,
@@ -229,7 +293,44 @@ class MultiHeadAttention(nn.Module):
     ) -> torch.Tensor:
         """Standard Multi-Head Attention forward pass."""
         # TODO: Implement standard MHA for comparison
-        pass
+        bs, s, _ = x.shape
+        d_head = self.d_model//self.num_heads
+
+        # compute Q, K, V
+        Q, K, V = self.Wq(x), self.Wk(x), self.Wv(x) # [bs, s, d_model]
+
+        # split d_model into num_heads
+        Q = Q.view(bs, s, self.num_heads, d_head).transpose(1, 2) # [bs, num_heads, s, d_head]
+        K = K.view(bs, s, self.num_heads, d_head).transpose(1, 2) # [bs, num_heads, s, d_head]
+        V = V.view(bs, s, self.num_heads, d_head).transpose(1, 2) # [bs, num_heads, s, d_head]
+
+        # perform SDPMM for each head
+        ## SDP
+        scores: torch.Tensor = Q @ K.transpose(-2, -1)
+        scores = scores / torch.sqrt(torch.tensor(d_head))
+        
+        ## mask
+        if mask is not None:
+            scores.masked_fill_(mask==0, -torch.inf)
+        
+        ## softmax
+        scores = F.softmax(scores, dim=-1)
+
+        ## dropout
+        scores = self.dropout(scores) # [bs, num_heads, s, s]
+
+        ## calculate outputs
+        outs: torch.Tensor = scores @ V # [bs, num_heads, s, d_head]
+
+        # concate heads back together (only the outputs, not attn scores)
+        outs = outs.transpose(1, 2).contiguous().view(bs, s, self.d_model) # [bs, s, d_model]
+
+        outs = self.Wo(outs)
+
+        if return_attention:
+            return outs, scores
+        else:
+            return outs
 
 
 def compare_kv_cache_sizes(

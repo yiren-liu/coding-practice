@@ -45,7 +45,21 @@ def scaled_dot_product_attention(
     # 3. Apply softmax
     # 4. Apply dropout if provided
     # 5. Compute weighted sum of values
-    pass
+
+    scores = query @ key.transpose(-2,-1) 
+    scores = scores / torch.sqrt(torch.tensor(query.shape[-1]))
+
+    if mask is not None:
+        scores.masked_fill_(mask==0, -torch.inf) # [batch_size, num_heads, seq_len_q, seq_len_k]
+    
+    scores = F.softmax(scores, dim=-1)
+
+    if dropout:
+        scores = dropout(scores)
+
+    attn = scores @ value
+
+    return attn, scores
 
 
 class ScaledDotProductAttention(nn.Module):
