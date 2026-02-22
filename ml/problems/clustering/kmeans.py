@@ -98,7 +98,29 @@ class KMeans:
         #    c. Check convergence (centroid movement < tol)
         # 
         # 3. Set self.labels_, self.inertia_, self.n_iter_
-        pass
+        if self.random_seed:
+            torch.manual_seed(self.random_seed)
+        n_samples, n_features = X.shape
+        indices = torch.randperm(n_samples)[:self.n_clusters]
+        self.centroids = X[indices].clone()
+
+        for i in range(self.max_iters):
+            labels = self._assign_labels(X)
+            new_centroids = self._update_centroids(X, labels)
+            centroid_shift = torch.sum((new_centroids - self.centroids) ** 2)
+            self.centroids = new_centroids
+
+            if centroid_shift < self.tol:
+                self.n_iter_ = i + 1
+                break
+        else:
+            self.n_iter_ = self.max_iters
+        
+        # Final assignment
+        self.labels_ = self._assign_labels(X)
+        self.inertia_ = self._compute_inertia(X, self.labels_)
+
+        return self
     
     def _assign_labels(self, X: torch.Tensor) -> torch.Tensor:
         """
@@ -117,7 +139,18 @@ class KMeans:
         # 
         # 2. Assign each point to nearest centroid
         #    Hint: Use torch.argmin along centroid dimension
-        pass
+        X_norm_sq = (X ** 2).sum(dim=1, keepdim=True)      # (N, 1)
+        C_norm_sq = (self.centroids ** 2).sum(dim=1, keepdim=True).T    # (1, M)
+        dot = X @ self.centroids.T # (N, M)
+
+        dist = X_norm_sq + C_norm_sq - 2 * dot # (N, M)
+
+        labels = dist.argmin(dim=-1)
+
+        return labels
+
+
+
     
     def _update_centroids(self, X: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
         """
@@ -135,7 +168,17 @@ class KMeans:
         #   new_centroid_i = mean(X[labels == i])
         # 
         # Handle empty clusters by keeping old centroid
-        pass
+        new_centroids = torch.zeros_like(self.centroids)
+
+        for k in range(self.n_clusters):
+            mask = labels == k
+            if mask.sum() > 0:
+                new_centroids[k] = X[mask].mean(dim=0)
+            else:
+                # Keep old centroid if cluster is empty
+                new_centroids[k] = self.centroids[k]
+        
+        return new_centroids
     
     def _compute_inertia(self, X: torch.Tensor, labels: torch.Tensor) -> float:
         """
@@ -150,7 +193,15 @@ class KMeans:
         """
         # TODO: Compute inertia
         # inertia = Σ ||x - centroid[label[x]]||²
-        pass
+        inertia = 0.0
+        for k in range(self.n_clusters):
+            mask = labels == k
+            if mask.sum() > 0:
+                cluster_points = X[mask]
+                centroid = self.centroids[k]
+                inertia += torch.sum((cluster_points - centroid) ** 2).item()
+        
+        return inertia
     
     def predict(self, X: torch.Tensor) -> torch.Tensor:
         """
@@ -163,7 +214,8 @@ class KMeans:
             Predicted labels [n_samples]
         """
         # TODO: Assign labels using fitted centroids
-        pass
+        labels = self._assign_labels(X)
+        return labels
     
     def fit_predict(self, X: torch.Tensor) -> torch.Tensor:
         """Fit and return cluster labels."""

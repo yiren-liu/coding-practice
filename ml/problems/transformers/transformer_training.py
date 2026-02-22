@@ -52,7 +52,11 @@ class CharTokenizer:
         # 2. Create char_to_idx mapping (char -> integer)
         # 3. Create idx_to_char mapping (integer -> char)
         # 4. Set vocab_size
-        pass
+        chars = sorted(set(text))
+
+        self.char_to_idx = {char: i for i, char in enumerate(chars)}
+        self.idx_to_char = {i: char for i, char in enumerate(chars)}
+        self.vocab_size = len(chars)
     
     def encode(self, text: str) -> List[int]:
         """
@@ -64,8 +68,7 @@ class CharTokenizer:
         Returns:
             List of token IDs
         """
-        # TODO: Convert each character to its ID
-        pass
+        return [self.char_to_idx[char] for char in text]
     
     def decode(self, tokens: List[int]) -> str:
         """
@@ -77,8 +80,87 @@ class CharTokenizer:
         Returns:
             Decoded string
         """
-        # TODO: Convert each ID back to character and join
-        pass
+        return ''.join([self.idx_to_char[idx] for idx in tokens])
+
+
+class RMSNorm(nn.Module):
+    """RMSNorm implementation."""
+    
+    def __init__(self, d_model: int, eps: float = 1e-6):
+        super().__init__()
+        self.eps = eps
+        self.weight = nn.Parameter(torch.ones(d_model))
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        rms = torch.sqrt(torch.mean(x ** 2, dim=-1, keepdim=True) + self.eps)
+        return self.weight * (x / rms)
+
+
+class MultiHeadAttention(nn.Module):
+    """Simplified multi-head attention."""
+    
+    def __init__(self, d_model: int, num_heads: int, dropout: float = 0.1):
+        super().__init__()
+        assert d_model % num_heads == 0
+        
+        self.d_model = d_model
+        self.num_heads = num_heads
+        self.d_k = d_model // num_heads
+        
+        self.W_q = nn.Linear(d_model, d_model)
+        self.W_k = nn.Linear(d_model, d_model)
+        self.W_v = nn.Linear(d_model, d_model)
+        self.W_o = nn.Linear(d_model, d_model)
+        self.dropout = nn.Dropout(dropout)
+    
+    def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+        batch_size, seq_len, d_model = x.shape
+        
+        # Linear projections
+        Q = self.W_q(x).view(batch_size, seq_len, self.num_heads, self.d_k).transpose(1, 2)
+        K = self.W_k(x).view(batch_size, seq_len, self.num_heads, self.d_k).transpose(1, 2)
+        V = self.W_v(x).view(batch_size, seq_len, self.num_heads, self.d_k).transpose(1, 2)
+        
+        # Scaled dot-product attention
+        scores = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(self.d_k)
+        
+        if mask is not None:
+            scores = scores.masked_fill(mask == 0, float('-inf'))
+        
+        attention_weights = F.softmax(scores, dim=-1)
+        attention_weights = self.dropout(attention_weights)
+        
+        output = torch.matmul(attention_weights, V)
+        output = output.transpose(1, 2).contiguous().view(batch_size, seq_len, d_model)
+        
+        return self.W_o(output)
+
+
+class TransformerBlock(nn.Module):
+    """Simplified transformer block."""
+    
+    def __init__(self, d_model: int, num_heads: int, d_ff: int, dropout: float = 0.1):
+        super().__init__()
+        
+        self.norm1 = RMSNorm(d_model)
+        self.norm2 = RMSNorm(d_model)
+        self.attention = MultiHeadAttention(d_model, num_heads, dropout)
+        
+        self.ffn = nn.Sequential(
+            nn.Linear(d_model, d_ff),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(d_ff, d_model)
+        )
+        
+        self.dropout1 = nn.Dropout(dropout)
+        self.dropout2 = nn.Dropout(dropout)
+    
+    def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+        # Pre-norm architecture
+        x = x + self.dropout1(self.attention(self.norm1(x), mask))
+        x = x + self.dropout2(self.ffn(self.norm2(x)))
+        return x
 
 
 class TransformerLM(nn.Module):
@@ -132,7 +214,36 @@ class TransformerLM(nn.Module):
         # - Token embeddings: nn.Embedding(vocab_size, d_model)
         # - Position embeddings: nn.Embedding(max_seq_len, d_model) (if not RoPE)
         # - Output layer can share weights with token embedding (weight tying)
-        pass
+        self.token_emb = nn.Embedding(vocab_size, d_model)
+        self.pos_emb = None
+        if not use_rope:
+            self.pos_emb = nn.Embedding(max_seq_len, d_model)
+
+        # Transformer blocks
+        self.blocks = nn.ModuleList([
+            TransformerBlock(self.d_model, num_heads, d_ff) for _ in range(num_layers)
+        ])
+
+        # Final layer norm and output projection
+        self.norm_f = RMSNorm(d_model)
+        self.lm_head = nn.Linear(d_model, vocab_size, bias=False)
+
+        # Weight tying: share weights between token embedding and output projection
+        self.lm_head.weight = self.token_emb.weight
+
+        self.dropout = nn.Dropout(dropout)
+        
+        # Initialize weights
+        self.apply(self._init_weights)
+
+    def _init_weights(self, module):
+        """Initialize weights with small random values."""
+        if isinstance(module, nn.Linear):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            if module.bias is not None:
+                torch.nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.Embedding):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
     
     def forward(
         self,
@@ -151,6 +262,7 @@ class TransformerLM(nn.Module):
             loss: Cross-entropy loss if targets provided, else None
         """
         batch_size, seq_len = x.shape
+        device = x.device
         
         # TODO: Implement forward pass:
         # 1. Get token embeddings
@@ -163,7 +275,37 @@ class TransformerLM(nn.Module):
         
         # Causal mask: Lower triangular matrix to prevent attending to future tokens
         # mask = torch.tril(torch.ones(seq_len, seq_len)).view(1, 1, seq_len, seq_len)
-        pass
+        emb = self.token_emb(x)
+
+        if self.pos_emb is not None:
+            positions = torch.arange(0, seq_len, dtype=torch.long, device=device)
+            emb += self.pos_emb(positions)
+        
+        x = emb
+
+        x = self.dropout(x)
+
+        mask = torch.tril(torch.ones(seq_len, seq_len, device=device)).view(1, 1, seq_len, seq_len)
+
+        for block in self.blocks:
+            x = block(x, mask)
+        
+        x = self.norm_f(x)
+
+
+        logits: torch.Tensor = self.lm_head(x)  # [batch_size, seq_len, vocab_size]
+
+        # Compute loss if targets provided
+        loss = None
+        if targets is not None:
+            # Flatten for cross-entropy
+            loss = F.cross_entropy(
+                logits.view(-1, logits.size(-1)),
+                targets.view(-1),
+                ignore_index=-1
+            )
+        
+        return logits, loss
     
     def generate(
         self,

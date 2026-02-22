@@ -601,6 +601,8 @@ Multi-Query Attention (MQA):
 - Falcon: 40B, 180B parameters
 - StarCoder: 15B parameters
 
+.
+
 Grouped-Query Attention (GQA):
 - LLaMA 2: 7B (num_kv_heads=8), 13B, 70B
 - Mistral 7B: num_heads=32, num_kv_heads=8

@@ -207,6 +207,8 @@ class TransformerLM(nn.Module):
             TransformerBlock(d_model, num_heads, d_ff, dropout)
             for _ in range(num_layers)
         ])
+
+        
         
         # Final layer norm and output projection
         self.norm_f = RMSNorm(d_model)
